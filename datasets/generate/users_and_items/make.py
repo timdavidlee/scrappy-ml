@@ -1,16 +1,19 @@
 import json
-from collections import Counter, OrderedDict
+from collections import Counter
 from functools import partial
-from multiprocessing.pool import ThreadPool
+from multiprocessing import Pool
 from typing import List, Dict, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+from scipy.sparse import coo_matrix
 
+from datasets.generate.users_and_items.shows import get_genre2movie, generate_shows_watched_per_year
+from datasets.generate.users_and_items.users import generate_user_profiles
+from datasets.generate.constants import PARALLELISM
 from datasets.util.logging import get_logger
-from datasets.generate.name_generator import generate_names
 
-PARALLELISM = 4
+
 logger = get_logger()
 
 # ======================================================================
@@ -18,9 +21,112 @@ logger = get_logger()
 # ======================================================================
 
 
+class NetflixUserShowDataset:
+    def __init__(self, csv_path: str, n_users: int = 10, n_genres: int = 5):
+        self.csv_path = csv_path
+        self.n_users = n_users
+        self.n_genres = n_genres
+        self.user2watches = None
+        self.movie_info = None
+        self.info_dicts = None
+
+        self.user2int = None
+        self.int2user = None
+
+        self.show2int = None
+        self.int2show = None
+
+        self.watches_df = None
+
+    def _load(self):
+        x, y, z = generate_synthetic_dataset(
+            self.csv_path, self.n_users, self.n_genres, show_report=True
+        )
+        self.user2watches = x
+        self.movie_info = y
+        self.info_dicts = z
+        self.int2user = {j: user for j, user in enumerate(sorted(x.keys()))}
+        self.user2int = {user: j for j, user in enumerate(sorted(x.keys()))}
+        self.show2int = {v["title"]: k for k, v in self.movie_info.items()}
+        self.int2show = {k: v["title"] for k, v in self.movie_info.items()}
+
+    def make(self):
+        self._load()
+
+    @property
+    def _as_df(self):
+        if self.watches_df is not None:
+            return self.watches_df
+
+        dfs = []
+        for user in self.user2watches:
+            df = pd.DataFrame(dict(
+                user_id_int=self.user2int[user],
+                show_id_int=self.user2watches[user],
+            ))
+            dfs.append(df)
+        concat_df = pd.concat(dfs, axis=0, ignore_index=True)
+        agg = concat_df.groupby(["user_id_int", "show_id_int"], as_index=False).size()
+        agg = agg.rename(columns={"size": "watches"})
+        self.watches_df = agg
+        return agg
+
+    @property
+    def as_coo_matrix(self):
+        agg = self._as_df
+        return coo_matrix(
+            (
+                agg["watches"].values,
+                (agg["user_id_int"].values, agg["show_id_int"].values), 
+            )
+        )
+
+
 def generate_synthetic_dataset(
     csv_path: str, n_users: int = 10, n_genres: int = 5, show_report: bool = False
-):
+) -> tuple:
+    """Create a recommender dataset
+
+        user2watches, movie_info = generate_synthetic_dataset(csv_path, n_users=100)
+
+    Args:
+        csv_path (str): path the netflix movie/genre dataset
+        n_users (int, optional): Number of fake users to generate. Defaults to 10.
+        n_genres (int, optional): Number of genre preferences per user. Defaults to 5.
+        show_report (bool, optional): Return an info dict about the users. Defaults to False.
+
+    Returns:
+        users2watches: username : show_id_ints
+            {'kip feist': [5396, 7954, 5570, ...}
+        movie_info: 
+            {
+                0: {'title': 'Dick Johnson Is Dead', 'genres': ('documentaries',)},
+                1: {'title': 'Blood & Water',
+                'genres': ('international tv shows', 'tv dramas', 'tv mysteries')},
+                2: {'title': 'Ganglands',
+                'genres': ('crime tv shows',
+                'international tv shows',
+                'tv action & adventure')},
+                3: {'title': 'Jailbirds New Orleans', 'genres': ('docuseries', 'reality tv')},
+                ...
+        info_dicts:
+            {
+                "sheldon mudpuppy": {
+                    "genre_profile_src": {
+                        "international tv shows": 0.5241,
+                        "anime features": 0.4334,
+                        "stand-up comedy": 0.023,
+                        "dramas": 0.0162,
+                        "cult movies": 0.0033
+                    },
+                    "genre_counts_synthetic": {
+                        "international tv shows": 45,
+                        "anime features": 37,
+                        "international movies": 29,
+                        "action & adventure": 27,
+                        "tv dramas": 19,
+                        "crime tv shows": 12,
+    """
     netflix_movies = pd.read_csv(csv_path)
 
     genre2movie = get_genre2movie(netflix_movies)
@@ -96,7 +202,7 @@ def generate_synthetic_watch_records(
         sample_watch_records_for_one_user,
         genre2movie=genre2movie
     )
-    pool = ThreadPool(PARALLELISM)
+    pool = Pool(PARALLELISM)
     user2watched_show_ids = dict()
     for result in pool.imap_unordered(single_func, profile_collection):
         username, watched_show_ids = result
@@ -177,148 +283,3 @@ def calculate_show_probability_based_on_user_profile(
     )
 
     return genre2show_id_probs
-
-
-def generate_weighted_profile(n: int = 2, dim: int = 6) -> np.ndarray:
-    """ Generates n_profiles, with probability distribution
-
-    Example of a 2 x 5 = 2 users, 5 genre's each
-        [[0.5, 0.3, 0.15, 0.03, 0.02]]
-        [[0.45, 0.25, 0.15, 0.08, 0.07]]
-
-    Args:
-        n (int): number of users
-        dim (int): dimension (how many genres they will have probs for)
-
-    Returns:
-        np.ndarray: a [n x dim] array of probabilities
-    """
-    floats = np.random.rand(n, dim)
-
-    # negatives are to sort in reverse order
-    arr = - np.sort(
-        - np.round((floats * 1000)), axis=1,
-    )
-    arr = np.power(arr, 1.5)
-    arr_norm = np.divide(arr, arr.sum(axis=1).reshape(-1, 1))
-    weights = np.round(arr_norm, 4)
-
-    # ensure rounded probabilities add to 1
-    weights[:, 0] = 1 - weights[:, 1:].sum(axis=1)
-    return weights
-
-
-def get_genre2movie(netflix_movies: pd.DataFrame) -> pd.DataFrame:
-    """convert netflix shows into genre2movie exploded format
-
-    Args:
-        netflix_movies (pd.DataFrame): a dataframe loaded from csv
-
-    Returns:
-        pd.DataFrame: exploded dataframe, with columns cleaned + dropped
-        output columns are:
-            - show_id_int
-            - title
-            - genre_norm
-    """
-    movies = netflix_movies.copy()
-    movies["show_id_int"] = movies.index
-    movies["listed_in"] = movies["listed_in"].map(lambda x: x.split(","))
-    exploded_genres = movies.explode("listed_in")
-    exploded_genres["genre_norm"] = (
-        exploded_genres["listed_in"]
-        .str.strip()
-        .str.lower()
-    )
-    return exploded_genres[["show_id_int", "title", "genre_norm"]]
-
-
-def _generate_up(
-    tup: tuple, dim: int, profiles: np.ndarray, genres_unique: List[str]
-) -> Tuple[str, dict]:
-    """generate the user profile, executes a single record
-
-    Intended to be used with a multiprocessing setup
-
-    Args:
-        tup (tuple): a tuple of (j: id, and n: string name)
-        dim (int): how many genres to sample
-        profiles (np.ndarray): global list of profiles [user x genre]
-        genres_unique (List[str]): global list of possible genres
-
-    Returns:
-        Tuple[str, dict]: returns a tuple of
-            (name, {genre: prob, ...})
-    """
-    j, n = tup
-    genres = np.random.choice(genres_unique, size=dim)
-    weights = list(np.round(profiles[j], 4))
-    weights[0] = 1 - sum(weights[1:])
-    if not np.isclose(sum(weights), 1.0):
-        raise ValueError(f"weights not totaling 1: {weights}, {sum(weights)}")
-
-    profile = OrderedDict([(g, w) for g, w in zip(genres, weights)])
-    logger.info(f"generating preferences for : {j:3} {n} \n {profile}")
-    return tuple([
-        n,
-        profile
-    ])
-
-
-def generate_user_profiles(
-    genres_unique: np.ndarray, n_users: int = 3, dim: int = 5
-) -> List[Tuple[str, dict]]:
-    """Generates (n_user) x profiles sized (dim)
-
-    Args:
-        genres_unique (np.ndarray): unique listing of genre (str)
-        n_users (int, optional): number of users to make. Defaults to 3.
-        dim (int, optional): how many genres per user to make. Defaults to 5.
-
-    Returns:
-        List[Tuple[str, dict]]: Returns a collection of
-            (user, profile<dict>)
-    """
-    names = generate_names(n_users)
-    profiles = generate_weighted_profile(n=n_users, dim=dim)
-
-    items = list(enumerate(names))
-    single_func = partial(
-        _generate_up,
-        dim=dim,
-        profiles=profiles,
-        genres_unique=genres_unique
-    )
-
-    profile_collection = []
-    pool = ThreadPool(PARALLELISM)
-    for result in pool.imap_unordered(single_func, items):
-        profile_collection.append(result)
-    pool.close()
-    pool.join()
-
-    return profile_collection
-
-
-def generate_shows_watched_per_year(n: int = 1) -> List[int]:
-    """ Will generate the number of shows watched per year,
-
-    The current distribtution is designed around the following:
-    50 shows in 1 year is roughly the median
-    but the longtail max is around 150
-
-    Args:
-        n: the number of samples to generate
-
-    Returns
-        List[int]: a list of watched show_id_ints
-    """
-    # returns whole numbers
-    shows_watched = np.random.poisson(lam=4, size=n) * 20 + 20
-
-    # smoothes out the distribution with some noise
-    shows_watched += np.random.randint(1, 5, size=n)
-
-    if n == 1:
-        return shows_watched[0]
-    return shows_watched

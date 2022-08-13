@@ -1,2 +1,4 @@
 gitpython==3.1.27
 pandas==1.4.3
+scipy==1.9.0
+implicit==0.6.0
