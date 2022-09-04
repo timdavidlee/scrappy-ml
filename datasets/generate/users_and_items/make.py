@@ -77,7 +77,7 @@ class NetflixUserShowDataset:
         return coo_matrix(
             (
                 agg["watches"].values,
-                (agg["user_id_int"].values, agg["show_id_int"].values), 
+                (agg["user_id_int"].values, agg["show_id_int"].values),
             )
         )
 
@@ -98,7 +98,7 @@ def generate_synthetic_dataset(
     Returns:
         users2watches: username : show_id_ints
             {'kip feist': [5396, 7954, 5570, ...}
-        movie_info: 
+        movie_info:
             {
                 0: {'title': 'Dick Johnson Is Dead', 'genres': ('documentaries',)},
                 1: {'title': 'Blood & Water',
