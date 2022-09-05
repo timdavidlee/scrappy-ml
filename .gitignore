@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# ignore notebooks at the base
+./*.ipynb
+
+# ignore vscode
+./vscode
+
 # Distribution / packaging
 .Python
 build/
